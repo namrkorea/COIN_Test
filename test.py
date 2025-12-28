@@ -34,7 +34,7 @@ except Exception:
 # ------------------------------------------
 # [전략 설정]
 # ------------------------------------------
-K_VALUE = 0.4            # 변동성 돌파 계수
+K_VALUE = 0.2            # 변동성 돌파 계수
 STOP_LOSS_PCT = 0.02     # 손절매 기준 (-2%)
 TAKE_PROFIT_PCT = 0.02   # ✅ 익절매 기준 (+2%) - "매수가 기준"
 MAX_HOLDINGS = 5         # 최대 보유 종목 수
@@ -365,5 +365,6 @@ if st.button('🚀 자동매매 가동 시작'):
             send_discord(f"❗ Loop Error: {e}")
             add_trade_log("ERROR", "-", reason=f"loop: {e}")
             time.sleep(10)
+
 
 
