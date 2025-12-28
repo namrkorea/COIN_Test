@@ -484,4 +484,3 @@ if st.button('🚀 자동매매 가동 시작'):
         except Exception as e:
             send_discord(f"❗ Loop Error: {e}")
             time.sleep(10)
-
