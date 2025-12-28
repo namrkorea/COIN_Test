@@ -34,9 +34,11 @@ except Exception:
 # ------------------------------------------
 # [전략 설정]
 # ------------------------------------------
-K_VALUE = 0.2            # 변동성 돌파 계수
+TARGET_INTERVAL = "minute60"  # ✅ (4) 시간봉으로 민감하게
+K_VALUE = 0.15                # ✅ (1)(3)(5) 더 민감(공격적) — 필요시 0.10~0.20 조절
+
 STOP_LOSS_PCT = 0.02     # 손절매 기준 (-2%)
-TAKE_PROFIT_PCT = 0.02   # ✅ 익절매 기준 (+2%) - "매수가 기준"
+TAKE_PROFIT_PCT = 0.02   # 익절매 기준 (+2%) - "매수가 기준"
 MAX_HOLDINGS = 5         # 최대 보유 종목 수
 MAX_BUY_AMOUNT = 15000   # 1회 최대 매수 한도
 CANDIDATE_SIZE = 20      # 감시 종목 수
@@ -46,30 +48,25 @@ RESET_WINDOW_MINUTES = 5     # 09:00~09:05 사이 1회 리셋
 COOLDOWN_SECONDS = 180       # 주문 후 동일 코인 재주문 방지(3분)
 
 MIN_ORDER_KRW = 5000
-TRADE_LOG_HOURS = 12         # ✅ 최근 N시간 거래내역 표시
 
 # ==========================================
-# [거래 로그(최근 12시간 표시)]
+# [거래 기록: 최근 24시간 매수 종목 요약]
 # ==========================================
-if "trade_logs" not in st.session_state:
-    st.session_state.trade_logs = []  # list[dict]
+if "buy_records" not in st.session_state:
+    st.session_state.buy_records = []  # list[dict]
 
-def add_trade_log(action: str, coin: str = "-", price=None, amount_krw=None, reason: str = "-"):
+def add_buy_record(coin: str, buy_time: datetime.datetime, buy_amount_krw: float, buy_price: float):
     try:
-        ts = datetime.datetime.now()
-        st.session_state.trade_logs.append({
-            "time": ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "action": action,
+        st.session_state.buy_records.append({
+            "buy_time": buy_time.strftime("%Y-%m-%d %H:%M:%S"),
             "coin": coin,
-            "price": None if price is None else float(price),
-            "amount_krw": None if amount_krw is None else int(amount_krw),
-            "reason": reason
+            "buy_amount_krw": int(buy_amount_krw),
+            "buy_price": float(buy_price),
         })
     except:
         pass
 
-# 본문 표시 영역(루프에서 계속 갱신)
-trade_log_box = st.empty()
+buy_summary_box = st.empty()
 
 # ==========================================
 # [3] 기능 함수 정의
@@ -105,15 +102,17 @@ def get_top_candidates(limit=20, fallback=None):
 
 def get_target_price(ticker: str):
     """
-    변동성 돌파 목표가 = 오늘 시가 + (전일 고가-저가)*K
+    ✅ (4) 60분봉 기준 변동성 돌파 목표가(민감)
+    목표가 = 이번 봉 시가 + (직전 봉 고가-저가)*K
     """
     try:
-        df = pyupbit.get_ohlcv(ticker, interval="day", count=2)
+        df = pyupbit.get_ohlcv(ticker, interval=TARGET_INTERVAL, count=2)
         if df is None or len(df) < 2:
             return None
-        yesterday = df.iloc[-2]
-        today_open = df.iloc[-1]['open']
-        return float(today_open) + (float(yesterday['high']) - float(yesterday['low'])) * K_VALUE
+
+        prev = df.iloc[-2]
+        curr_open = df.iloc[-1]["open"]
+        return float(curr_open) + (float(prev["high"]) - float(prev["low"])) * K_VALUE
     except:
         return None
 
@@ -165,13 +164,10 @@ def sell_all():
                 curr = pyupbit.get_current_price(coin)
                 if curr and curr * amount > MIN_ORDER_KRW:
                     upbit.sell_market_order(coin, amount)
-                    add_trade_log("SELL", coin, price=curr, reason="09:00 RESET")
                     time.sleep(0.3)
-        send_discord("🌅 09:00 리셋: 전량 매도 완료.")
-        add_trade_log("RESET", "-", reason="09:00 RESET DONE")
+        send_discord("🌅 전량 매도 완료.")
     except Exception as e:
         send_discord(f"❗ 전량매도 에러: {e}")
-        add_trade_log("ERROR", "-", reason=f"sell_all: {e}")
 
 
 def calculate_buy_amount(current_holding_count, krw_balance):
@@ -195,44 +191,70 @@ def is_cooled_down(ticker: str, cooldown_map: dict, now_ts: float):
     return (last is not None) and (now_ts - last < COOLDOWN_SECONDS)
 
 
-def render_trade_logs():
+def render_recent_buys_24h():
     """
-    ✅ 본문에 최근 12시간 거래내역 표시
+    최근 24시간동안 매수한 종목에 대해
+    - 매수시간
+    - 매수금액
+    - 현재평가금액
+    - 이익
+    표시
     """
-    cutoff = datetime.datetime.now() - datetime.timedelta(hours=TRADE_LOG_HOURS)
-    logs = st.session_state.trade_logs
+    cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
+    rows = []
 
-    # logs의 time 문자열을 datetime으로 다시 파싱(최소침습)
     recent = []
-    for x in logs[::-1]:  # 최신부터
+    for r in st.session_state.buy_records[::-1]:
         try:
-            t = datetime.datetime.strptime(x["time"], "%Y-%m-%d %H:%M:%S")
+            t = datetime.datetime.strptime(r["buy_time"], "%Y-%m-%d %H:%M:%S")
             if t >= cutoff:
-                recent.append(x)
+                recent.append(r)
             else:
                 break
         except:
             continue
+    recent = list(reversed(recent))
 
-    recent = list(reversed(recent))  # 다시 오래된->최신 순서
+    coins = sorted({r["coin"] for r in recent})
+    price_map = {}
+    if coins:
+        for c in coins:
+            price_map[c] = pyupbit.get_current_price(c)
 
-    with trade_log_box.container():
-        st.subheader(f"🧾 최근 {TRADE_LOG_HOURS}시간 거래내역")
-        if recent:
-            st.dataframe(recent, use_container_width=True, hide_index=True)
+    for r in recent:
+        coin = r["coin"]
+        buy_amount = float(r["buy_amount_krw"])
+        buy_price = float(r["buy_price"])
+        curr_price = price_map.get(coin)
+
+        qty_est = (buy_amount / buy_price) if (buy_price and buy_amount) else 0.0
+        curr_value = (qty_est * curr_price) if (curr_price and qty_est) else None
+        profit = (curr_value - buy_amount) if (curr_value is not None) else None
+
+        rows.append({
+            "매수시간": r["buy_time"],
+            "종목": coin,
+            "매수금액(KRW)": int(buy_amount),
+            "현재평가금액(KRW)": None if curr_value is None else int(curr_value),
+            "이익(KRW)": None if profit is None else int(profit),
+        })
+
+    with buy_summary_box.container():
+        st.subheader("🧾 최근 24시간 매수 종목 요약")
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
-            st.caption("최근 12시간 내 거래/이벤트 로그가 없습니다.")
+            st.caption("최근 24시간 내 매수 기록이 없습니다.")
 
 
 def liquidate_on_start(cooldown: dict):
     """
-    ✅ 프로그램 거래 시작 시 보유 종목이 '매수가 대비 +2% 이상 또는 -2% 이하'면 매도하고 시작
+    프로그램 거래 시작 시 보유 종목이 '매수가 대비 +2% 이상 또는 -2% 이하'면 매도하고 시작
     """
     try:
         now_ts = time.time()
         my_coins = get_my_coins()
         if not my_coins:
-            add_trade_log("START", "-", reason="no holdings")
             return
 
         for coin in my_coins:
@@ -241,54 +263,50 @@ def liquidate_on_start(cooldown: dict):
             if curr and avg and avg > 0:
                 rate = (curr - avg) / avg
 
-                # +2% 이상 또는 -2% 이하이면 매도
                 if rate >= TAKE_PROFIT_PCT or rate <= -STOP_LOSS_PCT:
                     amt = upbit.get_balance(coin)
                     if amt and curr * amt > MIN_ORDER_KRW:
                         upbit.sell_market_order(coin, amt)
                         cooldown[coin] = now_ts
                         send_discord(f"🧹 [시작청산] {coin} 매도 (수익률 {rate*100:.2f}%)")
-                        add_trade_log("SELL", coin, price=curr, reason=f"START LIQUIDATE ({rate*100:.2f}%)")
                         time.sleep(0.5)
 
-        add_trade_log("START", "-", reason="start liquidation check done")
     except Exception as e:
         send_discord(f"❗ 시작청산 에러: {e}")
-        add_trade_log("ERROR", "-", reason=f"liquidate_on_start: {e}")
 
+
+# ==========================================
+# ✅ [추가] 일괄 강제 매도 버튼
+# ==========================================
+if st.button("🧨 일괄 강제 매도 (전량)"):
+    sell_all()
+    st.warning("✅ 전량 시장가 매도를 실행했습니다. (디스코드 알림 확인)")
+    st.stop()
 
 # ==========================================
 # [4] 실행 루프
 # ==========================================
 if st.button('🚀 자동매매 가동 시작'):
-    send_discord("🤖 [V3.2] 자동매매 가동 시작")
-    add_trade_log("START", "-", reason="bot started")
+    send_discord("🤖 [V3.3] 자동매매 가동 시작")
 
-    # 초기 세팅
     candidates = get_top_candidates(CANDIDATE_SIZE)
     target_prices = build_target_prices(candidates)
 
-    # 리셋 1일 1회 플래그 (YYYY-MM-DD)
     last_reset_date = None
-
-    # 주문 쿨다운(중복 주문 방지): { "KRW-BTC": last_order_ts, ... }
     cooldown = {}
 
-    # ✅ 시작 시 보유 종목 정리 규칙 적용
     liquidate_on_start(cooldown)
 
     st.write("📊 모니터링 중... 디스코드 알림을 확인하세요.")
-    render_trade_logs()
+    render_recent_buys_24h()
 
     while True:
         try:
             now = datetime.datetime.now()
             now_ts = time.time()
 
-            # ✅ 거래내역(최근 12시간) 본문 갱신
-            render_trade_logs()
+            render_recent_buys_24h()
 
-            # 09:00 리셋 (09:00~09:05 사이 '하루 1회'만)
             today_str = now.strftime("%Y-%m-%d")
             if in_reset_window(now) and last_reset_date != today_str:
                 sell_all()
@@ -297,14 +315,12 @@ if st.button('🚀 자동매매 가동 시작'):
                 candidates = get_top_candidates(CANDIDATE_SIZE, fallback=candidates)
                 target_prices = build_target_prices(candidates)
 
-                # 리셋 직후엔 주문 꼬임 방지
                 cooldown.clear()
                 time.sleep(2)
 
             my_coins = get_my_coins()
             krw_balance = upbit.get_balance("KRW")
 
-            # A. 매도 체크 (✅ 손절 -2% / ✅ 익절 +2% : 모두 "매수가(평단) 기준")
             for coin in my_coins:
                 if is_cooled_down(coin, cooldown, now_ts):
                     continue
@@ -315,28 +331,23 @@ if st.button('🚀 자동매매 가동 시작'):
                 if curr and avg and avg > 0:
                     rate = (curr - avg) / avg
 
-                    # ✅ 익절(+2%)
                     if rate >= TAKE_PROFIT_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
                             upbit.sell_market_order(coin, amt)
                             cooldown[coin] = now_ts
                             send_discord(f"✅ {coin} 익절 완료 (+{TAKE_PROFIT_PCT*100:.1f}%) (현재 {rate*100:.2f}%)")
-                            add_trade_log("SELL", coin, price=curr, reason=f"TAKE PROFIT ({rate*100:.2f}%)")
                             time.sleep(0.5)
                         continue
 
-                    # 손절(-2%)
                     if rate <= -STOP_LOSS_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
                             upbit.sell_market_order(coin, amt)
                             cooldown[coin] = now_ts
                             send_discord(f"⛔ {coin} 손절 완료 (-{STOP_LOSS_PCT*100:.1f}%) (현재 {rate*100:.2f}%)")
-                            add_trade_log("SELL", coin, price=curr, reason=f"STOP LOSS ({rate*100:.2f}%)")
                             time.sleep(0.5)
 
-            # B. 매수 체크
             if len(my_coins) < MAX_HOLDINGS:
                 buy_amount = calculate_buy_amount(len(my_coins), krw_balance)
                 if buy_amount >= MIN_ORDER_KRW:
@@ -355,7 +366,14 @@ if st.button('🚀 자동매매 가동 시작'):
                             upbit.buy_market_order(coin, buy_amount)
                             cooldown[coin] = now_ts
                             send_discord(f"🚀 {coin} 돌파 매수 완료! (매수금액≈{int(buy_amount):,} KRW)")
-                            add_trade_log("BUY", coin, price=curr, amount_krw=buy_amount, reason="BREAKOUT BUY")
+
+                            add_buy_record(
+                                coin=coin,
+                                buy_time=datetime.datetime.now(),
+                                buy_amount_krw=buy_amount,
+                                buy_price=curr
+                            )
+
                             time.sleep(0.5)
                             break
 
@@ -363,8 +381,4 @@ if st.button('🚀 자동매매 가동 시작'):
 
         except Exception as e:
             send_discord(f"❗ Loop Error: {e}")
-            add_trade_log("ERROR", "-", reason=f"loop: {e}")
             time.sleep(10)
-
-
-
