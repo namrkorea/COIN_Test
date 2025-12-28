@@ -24,9 +24,7 @@ except Exception as e:
 # [사용자 설정 구역] 본인의 키를 입력하세요
 # ==========================================
 # 보안을 위해 Secrets 사용 권장 (st.secrets["키이름"] 방식)
-access = "UGnMADUZxRAuuA4MMLwMRUaEDOZ7xdgpBcDaDS8T"
-secret = "UWJ1GYQQoNIWOgq5zuSR9OC7Q7t4ng6blp1bB8pe"
-discord_url = "https://discord.com/api/webhooks/1446199475319079127/zf_qXtKYH04cCgVZYbPT5_J119B0a97pYzcm9bQucbSNfkGYKAnFAG_4d8Dmbm1roHP8"
+
 
 # ------------------------------------------
 # [전략 설정 변경]
@@ -142,4 +140,5 @@ if st.button('🚀 봇 가동 시작'):
         st.error(f"초기화 에러: {e}")
 
     #
+
 
