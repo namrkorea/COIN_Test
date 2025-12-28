@@ -3,9 +3,9 @@ import pyupbit
 import time
 import datetime
 import requests
-from zoneinfo import ZoneInfo  # ✅ 한국시간(KST) 적용
+from zoneinfo import ZoneInfo  # ✅ KST
 
-# ✅ 한국시간 타임존
+# ✅ 한국시간(KST) 고정
 KST = ZoneInfo("Asia/Seoul")
 
 def now_kst():
@@ -14,8 +14,8 @@ def now_kst():
 def fmt_kst(dt: datetime.datetime):
     return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-def parse_dt_kst(s: str):
-    # 저장된 문자열은 KST로 기록한다고 가정
+def parse_kst(s: str):
+    # 저장 문자열은 KST로 기록한다고 가정
     return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
 
 # ==========================================
@@ -105,8 +105,9 @@ def add_trade_record(side: str, coin: str, price: float, reason: str = "-", amou
     except:
         pass
 
-start_trade_box = st.empty()   # ✅ 시작 시 12시간 내 보유종목 거래 내역 표시
-status_box = st.empty()        # ✅ 매시 30분 모니터링/보유 표시
+start_trade_box = st.empty()     # ✅ 시작 시 12시간 내 보유종목 거래 내역 표시
+status_box = st.empty()          # ✅ 정각/30분 모니터링/보유 표시
+holdings_box = st.empty()        # ✅ 시작/정각/30분 보유손익 표시
 
 # ==========================================
 # [3] 기능 함수 정의
@@ -187,6 +188,55 @@ def get_my_coins():
         return []
 
 
+def get_holdings_pnl_rows(my_coins):
+    """
+    ✅ 보유종목의 매수금액(평단*수량), 평가금액(현재가*수량), 차이(평가-매수)
+    """
+    rows = []
+    try:
+        balances = upbit.get_balances() or []
+        bal_map = {}
+        for b in balances:
+            cur = b.get("currency")
+            if cur and cur != "KRW":
+                bal_map[f"KRW-{cur}"] = b
+
+        for coin in my_coins:
+            b = bal_map.get(coin)
+            if not b:
+                continue
+
+            qty = float(b.get("balance", 0))
+            avg = float(b.get("avg_buy_price", 0))
+            buy_amt = avg * qty
+
+            curr = pyupbit.get_current_price(coin)
+            eval_amt = (float(curr) * qty) if curr else None
+            diff = (eval_amt - buy_amt) if eval_amt is not None else None
+
+            if buy_amt >= MIN_ORDER_KRW:
+                rows.append({
+                    "종목": coin,
+                    "매수금액(KRW)": int(buy_amt),
+                    "평가금액(KRW)": None if eval_amt is None else int(eval_amt),
+                    "차이(KRW)": None if diff is None else int(diff),
+                })
+    except:
+        return []
+
+    return rows
+
+
+def render_holdings_pnl(my_coins, title="📦 보유종목 손익(매수/평가/차이)"):
+    rows = get_holdings_pnl_rows(my_coins)
+    with holdings_box.container():
+        st.subheader(title)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("표시할 보유종목이 없습니다.")
+
+
 def sell_all():
     try:
         balances = upbit.get_balances()
@@ -230,21 +280,13 @@ def is_cooled_down(ticker: str, cooldown_map: dict, now_ts: float):
 
 
 def render_recent_buys_24h():
-    """
-    최근 24시간동안 매수한 종목에 대해
-    - 매수시간
-    - 매수금액
-    - 현재평가금액
-    - 이익
-    표시
-    """
     cutoff = now_kst() - datetime.timedelta(hours=24)
     rows = []
 
     recent = []
     for r in st.session_state.buy_records[::-1]:
         try:
-            t = parse_dt_kst(r["buy_time"])
+            t = parse_kst(r["buy_time"])
             if t >= cutoff:
                 recent.append(r)
             else:
@@ -286,9 +328,6 @@ def render_recent_buys_24h():
 
 
 def liquidate_on_start(cooldown: dict):
-    """
-    프로그램 거래 시작 시 보유 종목이 '매수가 대비 +2% 이상 또는 -2% 이하'면 매도하고 시작
-    """
     try:
         now_ts = time.time()
         my_coins = get_my_coins()
@@ -319,7 +358,7 @@ def render_trades_12h_for_holdings(my_coins):
     rows = []
     for r in st.session_state.trade_records:
         try:
-            t = parse_dt_kst(r["time"])
+            t = parse_kst(r["time"])
             if t < cutoff:
                 continue
             if r["coin"] not in my_coins:
@@ -343,23 +382,41 @@ def render_trades_12h_for_holdings(my_coins):
             st.caption("최근 12시간 내(보유종목 기준) 매수/매도 기록이 없습니다.")
 
 
-def render_status(candidates, my_coins):
+def render_status_with_targets(candidates, target_prices, my_coins):
+    """
+    ✅ 정각/30분마다:
+    - 모니터링 종목
+    - 종목별 변동기준(목표가)
+    - 보유종목 매수금액/평가금액/차이
+    """
+    rows = []
+    for c in candidates:
+        rows.append({
+            "종목": c,
+            "변동기준(목표가)": None if target_prices.get(c) is None else float(target_prices.get(c)),
+        })
+
     with status_box.container():
-        st.subheader("📌 모니터링/보유 현황 (KST 기준, 매시 30분 업데이트)")
-        st.write("✅ 모니터링(후보):")
-        st.code(", ".join(candidates) if candidates else "-", language="text")
-        st.write("✅ 보유 종목:")
-        st.code(", ".join(my_coins) if my_coins else "-", language="text")
+        st.subheader("📌 모니터링/보유 현황 (KST 기준, 정각/30분 업데이트)")
+        st.write("✅ 모니터링 종목 + 종목별 변동기준(목표가):")
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("모니터링 종목이 없습니다.")
+
+    # 보유손익 표도 같이 갱신
+    render_holdings_pnl(my_coins, title="📦 보유종목 손익(매수금액/평가금액/차이) (KST)")
 
 
-def send_status_to_discord(candidates, my_coins):
-    msg = (
-        "📌 [30분 리포트/KST]\n"
-        f"- 모니터링({len(candidates)}): " + (", ".join(candidates) if candidates else "-") + "\n"
-        f"- 보유({len(my_coins)}): " + (", ".join(my_coins) if my_coins else "-")
+def send_status_to_discord(candidates, target_prices, my_coins):
+    # 디스코드는 길이 제한 고려해서 요약 형태로
+    mon = ", ".join([f"{c}(T={int(target_prices[c])})" for c in candidates if c in target_prices]) if candidates else "-"
+    hold = ", ".join(my_coins) if my_coins else "-"
+    send_discord(
+        "📌 [정각/30분 리포트/KST]\n"
+        f"- 모니터링: {mon}\n"
+        f"- 보유: {hold}"
     )
-    send_discord(msg)
-
 
 # ==========================================
 # ✅ [추가] 일괄 강제 매도 버튼 (✅ 기존 유지)
@@ -381,23 +438,31 @@ if st.button('🚀 자동매매 가동 시작'):
     last_reset_date = None
     cooldown = {}
 
+    # 시작 시 보유 정리(전략 유지)
     liquidate_on_start(cooldown)
 
+    # ✅ 시작 시: 보유종목 매수금액/평가금액/차이 표시
     my_coins_start = get_my_coins()
+    render_holdings_pnl(my_coins_start, title="🚀 시작 시 보유종목 손익(매수금액/평가금액/차이) (KST)")
+
+    # ✅ 시작 시 보유 종목 기준 최근 12시간 매수/매도 내역 표시(기존 유지)
     render_trades_12h_for_holdings(my_coins_start)
 
     st.write("📊 모니터링 중... 디스코드 알림을 확인하세요.")
     render_recent_buys_24h()
 
-    last_30m_report_key = None
+    # ✅ 정각/30분 리포트 중복 전송 방지 키 (YYYY-MM-DD HH:MM)
+    last_report_key = None
 
     while True:
         try:
             now = now_kst()          # ✅ KST
             now_ts = time.time()
 
+            # 기존 본문(24시간 매수 요약) 유지
             render_recent_buys_24h()
 
+            # 09:00 리셋 (기존 전략 유지)
             today_str = now.strftime("%Y-%m-%d")
             if in_reset_window(now) and last_reset_date != today_str:
                 sell_all()
@@ -412,12 +477,18 @@ if st.button('🚀 자동매매 가동 시작'):
             my_coins = get_my_coins()
             krw_balance = upbit.get_balance("KRW")
 
-            report_key = now.strftime("%Y-%m-%d %H")
-            if now.minute == 30 and last_30m_report_key != report_key:
-                render_status(candidates, my_coins)
-                send_status_to_discord(candidates, my_coins)
-                last_30m_report_key = report_key
+            # ✅ 매시 정각(00분)과 30분에:
+            # - 모니터링 종목/변동기준(목표가)
+            # - 보유종목 매수금액/평가금액/차이
+            # - 디스코드 전송
+            if now.minute in (0, 30):
+                report_key = now.strftime("%Y-%m-%d %H:%M")
+                if last_report_key != report_key:
+                    render_status_with_targets(candidates, target_prices, my_coins)
+                    send_status_to_discord(candidates, target_prices, my_coins)
+                    last_report_key = report_key
 
+            # A. 매도 체크 (손절 -2% / 익절 +2% : 매수가(평단) 기준) - 기존 전략 유지
             for coin in my_coins:
                 if is_cooled_down(coin, cooldown, now_ts):
                     continue
@@ -428,6 +499,7 @@ if st.button('🚀 자동매매 가동 시작'):
                 if curr and avg and avg > 0:
                     rate = (curr - avg) / avg
 
+                    # 익절(+2%)
                     if rate >= TAKE_PROFIT_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
@@ -438,6 +510,7 @@ if st.button('🚀 자동매매 가동 시작'):
                             time.sleep(0.5)
                         continue
 
+                    # 손절(-2%)
                     if rate <= -STOP_LOSS_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
@@ -447,6 +520,7 @@ if st.button('🚀 자동매매 가동 시작'):
                             add_trade_record("SELL", coin, price=curr, reason=f"STOP_LOSS({rate*100:.2f}%)")
                             time.sleep(0.5)
 
+            # B. 매수 체크 (기존 전략 유지)
             if len(my_coins) < MAX_HOLDINGS:
                 buy_amount = calculate_buy_amount(len(my_coins), krw_balance)
                 if buy_amount >= MIN_ORDER_KRW:
@@ -482,3 +556,4 @@ if st.button('🚀 자동매매 가동 시작'):
         except Exception as e:
             send_discord(f"❗ Loop Error: {e}")
             time.sleep(10)
+
