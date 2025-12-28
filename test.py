@@ -34,10 +34,10 @@ except Exception:
 # ------------------------------------------
 # [전략 설정]
 # ------------------------------------------
-K_VALUE = 0.5            # 변동성 돌파 계수
-STOP_LOSS_PCT = 0.03     # 손절매 기준 (-3%)
+K_VALUE = 0.4            # 변동성 돌파 계수
+STOP_LOSS_PCT = 0.02     # 손절매 기준 (-3%)
 MAX_HOLDINGS = 5         # 최대 보유 종목 수
-MAX_BUY_AMOUNT = 19000   # 1회 최대 매수 한도
+MAX_BUY_AMOUNT = 15000   # 1회 최대 매수 한도
 CANDIDATE_SIZE = 20      # 감시 종목 수
 
 RESET_HOUR = 9
@@ -249,3 +249,4 @@ if st.button('🚀 자동매매 가동 시작'):
         except Exception as e:
             send_discord(f"❗ Loop Error: {e}")
             time.sleep(10)
+
