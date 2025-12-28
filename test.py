@@ -3,6 +3,20 @@ import pyupbit
 import time
 import datetime
 import requests
+from zoneinfo import ZoneInfo  # ✅ 한국시간(KST) 적용
+
+# ✅ 한국시간 타임존
+KST = ZoneInfo("Asia/Seoul")
+
+def now_kst():
+    return datetime.datetime.now(KST)
+
+def fmt_kst(dt: datetime.datetime):
+    return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+def parse_dt_kst(s: str):
+    # 저장된 문자열은 KST로 기록한다고 가정
+    return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
 
 # ==========================================
 # [1] Streamlit UI 및 IP 확인
@@ -58,7 +72,7 @@ if "buy_records" not in st.session_state:
 def add_buy_record(coin: str, buy_time: datetime.datetime, buy_amount_krw: float, buy_price: float):
     try:
         st.session_state.buy_records.append({
-            "buy_time": buy_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "buy_time": fmt_kst(buy_time),  # ✅ KST 저장
             "coin": coin,
             "buy_amount_krw": int(buy_amount_krw),
             "buy_price": float(buy_price),
@@ -79,7 +93,7 @@ def add_trade_record(side: str, coin: str, price: float, reason: str = "-", amou
     side: 'BUY' or 'SELL'
     """
     try:
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = fmt_kst(now_kst())  # ✅ KST 저장
         st.session_state.trade_records.append({
             "time": ts,
             "side": side,
@@ -100,7 +114,7 @@ status_box = st.empty()        # ✅ 매시 30분 모니터링/보유 표시
 
 def send_discord(msg: str):
     try:
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = fmt_kst(now_kst())  # ✅ KST 표기
         requests.post(discord_url, json={"content": f"[{now}] {msg}"}, timeout=3)
     except:
         pass
@@ -224,13 +238,13 @@ def render_recent_buys_24h():
     - 이익
     표시
     """
-    cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
+    cutoff = now_kst() - datetime.timedelta(hours=24)
     rows = []
 
     recent = []
     for r in st.session_state.buy_records[::-1]:
         try:
-            t = datetime.datetime.strptime(r["buy_time"], "%Y-%m-%d %H:%M:%S")
+            t = parse_dt_kst(r["buy_time"])
             if t >= cutoff:
                 recent.append(r)
             else:
@@ -256,7 +270,7 @@ def render_recent_buys_24h():
         profit = (curr_value - buy_amount) if (curr_value is not None) else None
 
         rows.append({
-            "매수시간": r["buy_time"],
+            "매수시간(KST)": r["buy_time"],
             "종목": coin,
             "매수금액(KRW)": int(buy_amount),
             "현재평가금액(KRW)": None if curr_value is None else int(curr_value),
@@ -264,7 +278,7 @@ def render_recent_buys_24h():
         })
 
     with buy_summary_box.container():
-        st.subheader("🧾 최근 24시간 매수 종목 요약")
+        st.subheader("🧾 최근 24시간 매수 종목 요약 (KST)")
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
@@ -300,21 +314,18 @@ def liquidate_on_start(cooldown: dict):
         send_discord(f"❗ 시작청산 에러: {e}")
 
 
-# ==========================================
-# ✅ [추가] 시작 시: 보유종목 중 최근 12시간 매수/매도 내역 표시
-# ==========================================
 def render_trades_12h_for_holdings(my_coins):
-    cutoff = datetime.datetime.now() - datetime.timedelta(hours=12)
+    cutoff = now_kst() - datetime.timedelta(hours=12)
     rows = []
     for r in st.session_state.trade_records:
         try:
-            t = datetime.datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
+            t = parse_dt_kst(r["time"])
             if t < cutoff:
                 continue
             if r["coin"] not in my_coins:
                 continue
             rows.append({
-                "시간": r["time"],
+                "시간(KST)": r["time"],
                 "구분": r["side"],
                 "종목": r["coin"],
                 "가격": r["price"],
@@ -325,19 +336,16 @@ def render_trades_12h_for_holdings(my_coins):
             continue
 
     with start_trade_box.container():
-        st.subheader("🕒 시작 시점: 보유종목 최근 12시간 매수/매도 내역")
+        st.subheader("🕒 시작 시점: 보유종목 최근 12시간 매수/매도 내역 (KST)")
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
             st.caption("최근 12시간 내(보유종목 기준) 매수/매도 기록이 없습니다.")
 
 
-# ==========================================
-# ✅ [추가] 매시 30분: 모니터링/보유 종목 표시 + 디스코드 전송
-# ==========================================
 def render_status(candidates, my_coins):
     with status_box.container():
-        st.subheader("📌 모니터링/보유 현황 (매시 30분 업데이트)")
+        st.subheader("📌 모니터링/보유 현황 (KST 기준, 매시 30분 업데이트)")
         st.write("✅ 모니터링(후보):")
         st.code(", ".join(candidates) if candidates else "-", language="text")
         st.write("✅ 보유 종목:")
@@ -346,7 +354,7 @@ def render_status(candidates, my_coins):
 
 def send_status_to_discord(candidates, my_coins):
     msg = (
-        "📌 [30분 리포트]\n"
+        "📌 [30분 리포트/KST]\n"
         f"- 모니터링({len(candidates)}): " + (", ".join(candidates) if candidates else "-") + "\n"
         f"- 보유({len(my_coins)}): " + (", ".join(my_coins) if my_coins else "-")
     )
@@ -365,7 +373,7 @@ if st.button("🧨 일괄 강제 매도 (전량)"):
 # [4] 실행 루프
 # ==========================================
 if st.button('🚀 자동매매 가동 시작'):
-    send_discord("🤖 [V3.4] 자동매매 가동 시작")
+    send_discord("🤖 [V3.4] 자동매매 가동 시작 (KST)")
 
     candidates = get_top_candidates(CANDIDATE_SIZE)
     target_prices = build_target_prices(candidates)
@@ -373,28 +381,23 @@ if st.button('🚀 자동매매 가동 시작'):
     last_reset_date = None
     cooldown = {}
 
-    # 시작 시 보유 정리(전략 유지)
     liquidate_on_start(cooldown)
 
-    # ✅ 시작 시 보유 종목 기준 최근 12시간 매수/매도 내역 표시
     my_coins_start = get_my_coins()
     render_trades_12h_for_holdings(my_coins_start)
 
     st.write("📊 모니터링 중... 디스코드 알림을 확인하세요.")
     render_recent_buys_24h()
 
-    # ✅ 매시 30분 보고 중복 전송 방지 키
     last_30m_report_key = None
 
     while True:
         try:
-            now = datetime.datetime.now()
+            now = now_kst()          # ✅ KST
             now_ts = time.time()
 
-            # 기존 본문(24시간 매수 요약) 유지
             render_recent_buys_24h()
 
-            # 09:00 리셋 (기존 전략 유지)
             today_str = now.strftime("%Y-%m-%d")
             if in_reset_window(now) and last_reset_date != today_str:
                 sell_all()
@@ -409,14 +412,12 @@ if st.button('🚀 자동매매 가동 시작'):
             my_coins = get_my_coins()
             krw_balance = upbit.get_balance("KRW")
 
-            # ✅ 매시 30분: 모니터링/보유 표시 + 디스코드 전송
             report_key = now.strftime("%Y-%m-%d %H")
             if now.minute == 30 and last_30m_report_key != report_key:
                 render_status(candidates, my_coins)
                 send_status_to_discord(candidates, my_coins)
                 last_30m_report_key = report_key
 
-            # A. 매도 체크 (손절 -2% / 익절 +2% : 매수가(평단) 기준) - 기존 전략 유지
             for coin in my_coins:
                 if is_cooled_down(coin, cooldown, now_ts):
                     continue
@@ -427,7 +428,6 @@ if st.button('🚀 자동매매 가동 시작'):
                 if curr and avg and avg > 0:
                     rate = (curr - avg) / avg
 
-                    # 익절(+2%)
                     if rate >= TAKE_PROFIT_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
@@ -438,7 +438,6 @@ if st.button('🚀 자동매매 가동 시작'):
                             time.sleep(0.5)
                         continue
 
-                    # 손절(-2%)
                     if rate <= -STOP_LOSS_PCT:
                         amt = upbit.get_balance(coin)
                         if amt and curr * amt > MIN_ORDER_KRW:
@@ -448,7 +447,6 @@ if st.button('🚀 자동매매 가동 시작'):
                             add_trade_record("SELL", coin, price=curr, reason=f"STOP_LOSS({rate*100:.2f}%)")
                             time.sleep(0.5)
 
-            # B. 매수 체크 (기존 전략 유지)
             if len(my_coins) < MAX_HOLDINGS:
                 buy_amount = calculate_buy_amount(len(my_coins), krw_balance)
                 if buy_amount >= MIN_ORDER_KRW:
@@ -470,7 +468,7 @@ if st.button('🚀 자동매매 가동 시작'):
 
                             add_buy_record(
                                 coin=coin,
-                                buy_time=datetime.datetime.now(),
+                                buy_time=now_kst(),
                                 buy_amount_krw=buy_amount,
                                 buy_price=curr
                             )
